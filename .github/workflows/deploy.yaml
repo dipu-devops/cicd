@@ -15,8 +15,8 @@ on:
         - green
 
 env:
-  REGISTRY: ghcr.io
-  IMAGE_NAME: ${{ github.repository }}
+  REGISTRY: docker.io
+  IMAGE_NAME: erdipu/sit-api-gateway  # CHANGE THIS to your Docker Hub username/repo
 
 jobs:
   build-and-test:
@@ -30,12 +30,11 @@ jobs:
     - name: Set up Docker Buildx
       uses: docker/setup-buildx-action@v3
 
-    - name: Log in to Container Registry
+    - name: Log in to Docker Hub
       uses: docker/login-action@v3
       with:
-        registry: ${{ env.REGISTRY }}
-        username: ${{ github.actor }}
-        password: ${{ secrets.GITHUB_TOKEN }}
+        username: ${{ secrets.DOCKERHUB_USERNAME }}
+        password: ${{ secrets.DOCKERHUB_TOKEN }}
 
     - name: Extract metadata
       id: meta
@@ -81,12 +80,11 @@ jobs:
         sudo usermod -a -G docker $USER
         newgrp docker
 
-    - name: Log in to Container Registry
+    - name: Log in to Docker Hub
       uses: docker/login-action@v3
       with:
-        registry: ${{ env.REGISTRY }}
-        username: ${{ github.actor }}
-        password: ${{ secrets.GITHUB_TOKEN }}
+        username: ${{ secrets.DOCKERHUB_USERNAME }}
+        password: ${{ secrets.DOCKERHUB_TOKEN }}
 
     - name: Deploy to Docker on RHEL
       id: deploy
@@ -113,7 +111,7 @@ jobs:
 
         services:
           api-gateway-$DEPLOYMENT_COLOR:
-            image: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ needs.build-and-test.outputs.image-tag }}
+            image: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:main  # Using main tag
             container_name: api-gateway-$DEPLOYMENT_COLOR
             ports:
               - "$GATEWAY_PORT:3000"
@@ -161,7 +159,7 @@ jobs:
         sudo docker-compose -f docker-compose-$DEPLOYMENT_COLOR.yml down || true
 
         # Pull latest image
-        sudo docker pull ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ needs.build-and-test.outputs.image-tag }}
+        sudo docker pull ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:main
 
         # Start new deployment
         sudo docker-compose -f docker-compose-$DEPLOYMENT_COLOR.yml up -d
