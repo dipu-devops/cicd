@@ -1,0 +1,158 @@
+name: Blue-Green Deploy to AWS EC2
+
+on:
+  push:
+    branches:
+      - main # Or your deployment branch, e.g., devopsT
+
+env:
+  AWS_REGION: ${{ secrets.AWS_REGION }}
+  ECR_REPOSITORY: ${{ secrets.ECR_REPOSITORY }}
+  EC2_HOST: ${{ secrets.EC2_HOST }}
+  EC2_USER: ${{ secrets.EC2_USER }}
+
+jobs:
+  build-and-deploy:
+    name: Build and Deploy
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Login to Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Build, tag, and push image to Amazon ECR
+        id: build-image
+        env:
+          ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+          IMAGE_TAG: ${{ github.sha }}
+        run: |
+          docker build -t $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG .
+          docker push $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG
+          echo "image=$ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG" >> $GITHUB_OUTPUT
+
+      - name: Deploy to EC2
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ env.EC2_HOST }}
+          username: ${{ env.EC2_USER }}
+          key: ${{ secrets.EC2_SSH_KEY }}
+          script: |
+            set -e # Exit immediately if a command exits with a non-zero status.
+
+            # --- Blue/Green Deployment Logic ---
+            # Determine which color is currently active and which is inactive
+            BLUE_CONTAINER_NAME="api-gateway-blue"
+            GREEN_CONTAINER_NAME="api-gateway-green"
+            
+            # Check if the blue container is running. If not, we deploy blue.
+            if [ ! "$(docker ps -q -f name=^/${BLUE_CONTAINER_NAME}$)" ]; then
+                CURRENT_COLOR="green" # Assume green is running, or nothing is
+                NEW_COLOR="blue"
+                NEW_PORT=3000
+                OLD_COLOR="green"
+            else
+                CURRENT_COLOR="blue"
+                NEW_COLOR="green"
+                NEW_PORT=3001
+                OLD_COLOR="blue"
+            fi
+
+            NEW_CONTAINER_NAME="api-gateway-${NEW_COLOR}"
+            OLD_CONTAINER_NAME="api-gateway-${OLD_COLOR}"
+
+            echo "--- Deploying new version to ${NEW_COLOR} environment on port ${NEW_PORT} ---"
+
+            # Ensure the docker network exists
+            if [ -z $(docker network ls --filter name=^sit-network$ --format="{{ .Name }}") ] ; then
+              docker network create sit-network
+            fi
+
+            # Login to ECR on the EC2 instance
+            aws ecr get-login-password --region ${{ env.AWS_REGION }} | docker login --username AWS --password-stdin ${{ steps.login-ecr.outputs.registry }}
+
+            # Pull the new image from ECR
+            docker pull ${{ steps.build-image.outputs.image }}
+
+            # Create .env file from secret (or update it)
+            echo "${{ secrets.ENV_FILE_CONTENT }}" > .env
+
+            # Run the new "green" (or "blue") container on its designated port
+            docker run -d \
+              --name ${NEW_CONTAINER_NAME} \
+              -p ${NEW_PORT}:3000 \
+              --env-file .env \
+              --network sit-network \
+              --restart always \
+              ${{ steps.build-image.outputs.image }}
+
+            echo "--- Waiting for new container to be healthy ---"
+            sleep 10 # Give the container a moment to start
+            # Health check loop
+            for i in {1..10}; do
+              if curl -sf http://127.0.0.1:${NEW_PORT}/health > /dev/null; then
+                echo "New container is healthy!"
+                # --- Switch Traffic ---
+                echo "set \$upstream_api_gateway http://127.0.0.1:${NEW_PORT};" > /etc/nginx/conf.d/api_gateway.conf
+                sudo nginx -s reload
+                echo "--- Traffic switched to ${NEW_COLOR} environment ---"
+                
+                # --- Cleanup ---
+                echo "--- Stopping and removing old ${OLD_COLOR} container ---"
+                if [ "$(docker ps -a -q -f name=^/${OLD_CONTAINER_NAME}$)" ]; then
+                    docker stop ${OLD_CONTAINER_NAME}
+                    docker rm ${OLD_CONTAINER_NAME}
+                fi
+
+                # Clean up old images
+                docker image prune -f
+                exit 0
+              fi
+              echo "Waiting for health check... (attempt $i)"
+              sleep 5
+            done
+
+            echo "Health check failed after multiple attempts. Rolling back."
+            docker stop ${NEW_CONTAINER_NAME}
+            docker rm ${NEW_CONTAINER_NAME}
+            exit 1
+
+
+# ### Explanation of the Workflow
+
+# 1.  **Trigger**: The workflow runs automatically whenever you push code to the `main` branch.
+# 2.  **Checkout**: It checks out your source code into the runner environment.
+# 3.  **Configure AWS Credentials**: It securely logs into your AWS account using the secrets you provided.
+# 4.  **Login to Amazon ECR**: It authenticates the Docker client with your private Amazon ECR registry.
+# 5.  **Build, Tag, and Push**:
+#     *   It builds a Docker image from your `Dockerfile`.
+#     *   It tags the image with the unique Git commit SHA to ensure you're deploying a specific version.
+#     *   It pushes this new image to your ECR repository.
+# 6.  **Deploy to EC2**:
+#     *   This step uses the `appleboy/ssh-action` to securely connect to your EC2 instance.
+#     *   It stops and removes any old `api-gateway` container to prevent conflicts.
+#     *   It logs into ECR on the EC2 instance to get permission to pull images.
+#     *   It pulls the newly built Docker image from ECR.
+#     *   It creates a `.env` file on the EC2 instance using the `ENV_FILE_CONTENT` secret.
+#     *   It starts a new container using `docker run`, mapping port 3000, loading the environment variables, and setting it to always restart.
+#     *   Finally, it cleans up old, unused Docker images to save disk space.
+
+# ### Prerequisites on Your EC2 Instance
+
+# For this deployment to work, your EC2 instance must have:
+
+# 1.  **Docker Installed**: You can follow the official Docker installation guide for your Linux distribution.
+# 2.  **AWS CLI Installed**: This is needed for the EC2 instance to log in to ECR. See the AWS CLI install guide.
+# 3.  **Correct IAM Permissions**: The IAM user whose credentials you stored in GitHub Secrets needs permissions for ECR (to push and pull images). A good starting point is the `AmazonEC2ContainerRegistryPowerUser` managed policy. The EC2 instance itself will also need an IAM role with `AmazonEC2ContainerRegistryReadOnly` to be ableto pull images.
+
+# This pipeline provides a robust and automated way to get your API gateway deployed. Let me know if you have any questions!
