@@ -65,7 +65,7 @@ jobs:
 
   deploy-to-rhel:
     needs: build-and-test
-    runs-on: [self-hosted, linux, rhel]
+    runs-on: [self-hosted, Linux, X64]
     environment: 
       name: ${{ github.event.inputs.environment || 'blue' }}
       url: ${{ steps.deploy.outputs.deployment-url }}
@@ -235,7 +235,7 @@ jobs:
 
   switch-traffic:
     needs: deploy-to-rhel
-    runs-on: [self-hosted, linux, rhel]
+    runs-on: [self-hosted, Linux, X64]
     if: github.event_name == 'workflow_dispatch'
     
     steps:
