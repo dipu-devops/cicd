@@ -156,13 +156,13 @@ jobs:
         EOF
 
         # Stop existing deployment if running
-        sudo docker compose -f docker compose-$DEPLOYMENT_COLOR.yml down || true
+        sudo docker compose -f docker-compose-$DEPLOYMENT_COLOR.yml down || true
 
         # Pull latest image
         sudo docker pull ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:main
 
         # Start new deployment
-        sudo docker compose -f docker compose-$DEPLOYMENT_COLOR.yml up -d
+        sudo docker compose -f docker-compose-$DEPLOYMENT_COLOR.yml up -d
 
         # Wait for service to be healthy
         echo "Waiting for service to be healthy..."
